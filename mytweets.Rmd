@@ -1,0 +1,198 @@
+---
+title: "My Tweet Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(repos='http://cran.rstudio.com/')
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tibble)
+library(stringr)
+#install.packages('gridExtra', dependencies=TRUE, repos='http://cran.rstudio.com/')
+library(gridExtra)
+library(scales)
+library(lubridate)
+#install.packages('ggrepel', dependencies=TRUE, repos='http://cran.rstudio.com/')
+library(ggrepel)
+library(reshape2)
+library(kableExtra)
+library(tm)
+library(wordcloud)
+#install.packages('tidytext', dependencies=TRUE, repos='http://cran.rstudio.com/')
+
+library(tidytext)
+library(broom)
+library(topicmodels)
+#install.packages('bit64')
+install.packages("wordcloud2")
+library(wordcloud2)
+```
+
+## import file
+
+```{r}
+path <- ""
+tweets <- as_tibble(data.table::fread(str_c(path, "tweets.csv"), encoding= "UTF-8"))
+```
+
+## Lets look at the data
+```{r}
+tweets$time <- ymd_hms(tweets$timestamp)
+glimpse(tweets)
+tweets <- tweets %>% rename (doc_id = tweet_id)
+```
+
+```{r}
+
+tweets$text <- str_replace_all(tweets$text, "[\n]" , "") #remove new lines
+tweets$text <- str_replace_all(tweets$text, "&amp", "") # rm ampersand
+
+#URLs are always at the end and did not counts towards the 140 characters limit
+tweets$text <- str_replace_all(tweets$text, "http.*" , "")
+#tweets$text <- str_replace_all(tweets$text, "RT.*" , "")
+tweets$text <- str_replace_all(tweets$text, "@.*" , "")
+
+tweets <- tweets[!(is.na(tweets$text) | tweets$text==""), ]
+```
+
+##Creating COrpus objects
+
+```{r}
+tweetCorpus <- DataframeSource(tweets)
+tweetCorpus <- VCorpus(tweetCorpus)
+tweetCorpus
+```
+
+```{r}
+CleanCorpus <- function(x){
+     x <- tm_map(x, content_transformer(tolower))
+     x <- tm_map(x, removeNumbers) 
+     x <- tm_map(x, removeWords, c(tidytext::stop_words$word,"fuck", "fuckin", "west", "yeezy","shit", "gonna", "nowplaying", "goodnight", "teamswagon", "himym", "barney"))
+     x <- tm_map(x, removePunctuation)
+     x <- tm_map(x, stripWhitespace)
+     return(x)
+}
+
+RemoveNames <- function(x) {
+       x <- tm_map(x, removeWords, c("umar", "umar arshid", "arshid", "umar sabir arshid"))
+       return(x)
+}
+CreateTermsMatrix <- function(x) {
+        x <- TermDocumentMatrix(x)
+        x <- as.matrix(x)
+        y <- rowSums(x)
+        y <- sort(y, decreasing=TRUE)
+        return(y)
+}
+```
+
+```{r}
+tweetCorpus <- CleanCorpus(tweetCorpus)
+TermFreq <- CreateTermsMatrix(tweetCorpus)
+```
+
+```{r}
+tweetDF <- data.frame(word=names(TermFreq), count=TermFreq)
+
+tweetDF[1:20,] %>%
+        ggplot(aes(x=(reorder(word, count)), y=count)) +
+        geom_bar(stat='identity', fill="blue") + coord_flip() + theme(legend.position = "none") +
+        labs(x="")
+
+```
+
+```{r}
+wordcloud(tweetDF$word, tweetDF$count, max.words = 100, scale=c(2.5,.5), random.color = TRUE, colors=brewer.pal(9,"Set1"))
+```
+
+```{r}
+wordcloud2::wordcloud2(tweetDF[1:100,], color = "random-light", backgroundColor = "grey", shuffle=FALSE, size=0.4)
+```
+
+```{r}
+tweetTidy <- tidy(tweetCorpus)
+```
+```{r}
+
+plotBigrams <- function(tibble, topN=20, title="", color="#FF1493"){
+        x <- tibble %>% select(text) %>%
+        unnest_tokens(bigram, text, token = "ngrams", n = 2)
+        y <- x %>% count(bigram, sort = TRUE) %>% top_n(topN, wt=n) %>%
+        ggplot(aes(x=reorder(bigram, n), y=n)) +
+        geom_bar(stat='identity', fill=color) + coord_flip() +
+        theme(legend.position="none") + labs(x="", title=title)
+}
+
+b <- plotBigrams(tweetTidy, title="Bigrams Umar", color="blue")
+b
+
+```
+
+```{r}
+DocMetatweet <- meta(tweetCorpus)
+DocMetatweet$date <- date(DocMetatweet$time)
+tweetTidy$date <- DocMetatweet$date
+
+Words <- tweetTidy %>% unnest_tokens(word, text)
+
+Bing <- Words %>% inner_join(get_sentiments("bing"), by="word")
+
+b1 <- Bing %>% count(word, sentiment, sort=TRUE) %>%
+        group_by(sentiment) %>% arrange(desc(n)) %>% slice(1:20) %>%
+        ggplot(aes(x=reorder(word, n), y=n)) +
+        geom_col(aes(fill=sentiment), show.legend=FALSE) +
+        coord_flip() +
+        facet_wrap(~sentiment, scales="free_y") +
+        labs(x="", y="number of times used", title="Umar's most used words") +
+        scale_fill_manual(values = c("positive"="green", "negative"="red"))
+b1
+```
+
+```{r}
+t1 <- Bing%>% group_by(date) %>% count(sentiment) %>%
+        spread(sentiment, n) %>% mutate(score=positive-negative) %>%
+        ggplot(aes(x=date, y=score)) +
+        scale_x_date(limits=c(as.Date("2016-01-05"), as.Date("2019-02-19")), date_breaks = "4 month", date_labels = "%b") +
+        geom_line(stat="identity", col="blue") + geom_smooth(col="red") + labs(title="Sentiment Umar")
+
+t1
+```
+
+```{r}
+Afinn <- Words %>% inner_join(get_sentiments("afinn"), by="word")
+
+t1 <- Afinn %>% select(date, word, score)
+#t1 <- t1 %>% mutate_at(vars(word), funs(as.character(.))) %>%
+        #bind_rows(summarise(date="total score", word="", t1, score=sum(score)))
+kable(t1)
+
+```
+
+```{r}
+a1 <- Afinn %>% group_by(date) %>% summarise(score=sum(score)) %>%
+        ggplot(aes(x=date, y=score)) +
+        scale_x_date(limits=c(as.Date("2016-01-01"), as.Date("2019-02-19")), date_breaks = "4 month", date_labels = "%b") +
+        geom_line(stat="identity", col="blue") + geom_smooth(col="red") + labs(title="Sentiment Afinn Umar from 2016 to present")
+
+a1
+
+```
+
+```{r}
+Nrc <- Words %>% inner_join(get_sentiments("nrc"), by="word")
+
+n1 <- Nrc  %>% count(sentiment) %>%
+        ggplot(aes(x=sentiment, y=n, fill=sentiment)) +
+        geom_bar(stat="identity") + coord_polar() +
+        theme(legend.position = "none", axis.text.x = element_blank()) +
+        geom_text(aes(label=sentiment, y=2500)) +
+        labs(x="", y="", title="Umar")
+
+n1
+
+```
